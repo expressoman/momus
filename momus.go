@@ -1,4 +1,4 @@
-// Package momus is a web scraper made to health check all the links (internal and external) inside a given site.
+// Package momus is a web scraper made to health check all the internal links inside a given site.
 package momus
 
 import (
@@ -23,7 +23,8 @@ type HealthChecker struct {
 }
 
 var (
-	mutex          sync.Mutex
+	indexOfMutex   sync.Mutex
+	addMutex       sync.Mutex
 	parsedStartUrl *url.URL
 )
 
@@ -50,7 +51,7 @@ func New(config *Config) *HealthChecker {
 	return checker
 }
 
-// Perform a deep search for all links inside the link and return a slice containing the result
+// Perform a deep search for all internal links inside the link and return a slice containing the result
 func (checker *HealthChecker) GetLinks(link string) []LinkResult {
 	parsedUrl, err := url.Parse(link)
 	if err != nil {
@@ -63,24 +64,36 @@ func (checker *HealthChecker) GetLinks(link string) []LinkResult {
 	g.Add(1)
 
 	var links []LinkResult
-	go checker.getLinksAux(link, &links, g)
+	go checker.getLinksAux(parsedUrl, link, &links, g)
 
 	g.Wait()
 
 	return links
 }
 
-func (checker *HealthChecker) getLinksAux(link string, result *[]LinkResult, g *sync.WaitGroup) {
+func (checker *HealthChecker) getLinksAux(link *url.URL, rawLink string, result *[]LinkResult, g *sync.WaitGroup) {
 	defer g.Done()
-	resp, err := http.Get(link)
+	resp, err := http.Get(link.String())
 
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
+		checker.addLink(result, LinkResult{Link: link.String(), StatusCode: 0, rawLink: rawLink})
+		return
+	}
+
+	checker.addLink(result, LinkResult{Link: link.String(), StatusCode: resp.StatusCode, rawLink: rawLink})
+
+	if resp.StatusCode != http.StatusOK {
+		return
 	}
 
 	body := resp.Body
 
 	defer body.Close()
+
+	if !isSameDomain(link) {
+		return
+	}
 
 	tokenizer := html.NewTokenizer(body)
 
@@ -100,28 +113,28 @@ func (checker *HealthChecker) getLinksAux(link string, result *[]LinkResult, g *
 			href := getHref(token)
 			href = removeSlash(href)
 
-			if href != "" && indexOf(result, href) == -1 {
-				parsedUrl, err := url.Parse(href)
-				if err != nil {
-					log.Printf("Invalid URL: %s", href)
-					continue
-				}
-
-				if strings.HasPrefix(href, "#") || href == "//:0" {
-					log.Printf("Invalid URL: %s", href)
-					continue
-				}
-
-				if isSameDomain(parsedUrl) {
-					fullUrl := getFullLink(parsedUrl)
-					checker.addLink(result, LinkResult{Link: fullUrl, rawLink: href, StatusCode: resp.StatusCode})
-
-					g.Add(1)
-					go checker.getLinksAux(fullUrl, result, g)
-				} else {
-					checker.addLink(result, LinkResult{Link: href, rawLink: href, StatusCode: resp.StatusCode})
-				}
+			if indexOf(result, href) != -1 {
+				continue
 			}
+
+			parsedUrl, err := url.Parse(href)
+			if err != nil {
+				continue
+			}
+
+			if href == "" || strings.HasPrefix(href, "#") || href == "//:0" {
+				continue
+			}
+
+			if !isSameDomain(parsedUrl) {
+				continue
+			}
+
+			parsedFullUrl := getFullLink(parsedUrl)
+
+			g.Add(1)
+
+			go checker.getLinksAux(parsedFullUrl, href, result, g)
 
 		case tokenType == html.ErrorToken:
 			return
@@ -140,6 +153,9 @@ func getHref(token html.Token) string {
 }
 
 func indexOf(links *[]LinkResult, link string) int {
+	indexOfMutex.Lock()
+	defer indexOfMutex.Unlock()
+
 	for i, linkResult := range *links {
 		if linkResult.rawLink == link {
 			return i
@@ -161,12 +177,12 @@ func isSameDomain(href *url.URL) bool {
 	return false
 }
 
-func getFullLink(link *url.URL) string {
+func getFullLink(link *url.URL) *url.URL {
 	if strings.HasPrefix(link.String(), "http") {
-		return link.String()
+		return link
 	}
 
-	return parsedStartUrl.ResolveReference(link).String()
+	return parsedStartUrl.ResolveReference(link)
 }
 
 func removeSlash(link string) string {
@@ -178,8 +194,12 @@ func removeSlash(link string) string {
 }
 
 func (checker *HealthChecker) addLink(linkResults *[]LinkResult, link LinkResult) {
-	mutex.Lock()
-	defer mutex.Unlock()
+	addMutex.Lock()
+	defer addMutex.Unlock()
+
+	if indexOf(linkResults, link.rawLink) != -1 {
+		return
+	}
 
 	if (checker.onlyDeadLinks && link.StatusCode != 200) || (!checker.onlyDeadLinks) {
 		*linkResults = append(*linkResults, link)

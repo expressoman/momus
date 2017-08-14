@@ -3,7 +3,7 @@ momus
 
 [![GoDoc](https://godoc.org/github.com/fagnercarvalho/momus?status.svg)](https://godoc.org/github.com/fagnercarvalho/momus)
 
-momus is a web scraper written in Go made to health check all the links (internal and external) inside a given site.
+momus is a web scraper written in Go made to health check all the internal links inside a given site.
 
 ## Quick Start
 
